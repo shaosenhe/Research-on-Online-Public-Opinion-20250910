@@ -1,0 +1,88 @@
+import pandas as pd
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from torch.nn.functional import softmax
+import re
+import matplotlib.pyplot as plt
+import os
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+MODEL_NAME = os.path.join(current_dir, 'IDEA-CCNL-Erlangshen-Roberta-330M-Sentiment')
+INPUT_EXCEL = os.path.join(current_dir, 'emotioninput.xlsx')
+OUTPUT_EXCEL = os.path.join(current_dir, 'emotionoutput.xlsx') 
+TEXT_COLUMN = 'text'
+BATCH_SIZE = 16  # Batch size, adjust based on available GPU memory
+MAX_LENGTH = 512  # Maximum length supported by the model
+
+if not os.path.exists(INPUT_EXCEL):
+    raise FileNotFoundError(f"Input file not found: {INPUT_EXCEL}")
+
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+print(f'Using device: {device}')
+
+# Load tokenizer and model
+print(f"Loading model: {MODEL_NAME}")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
+model.to(device)
+model.eval()
+
+# Data cleaning function
+def clean_text(text):
+    # Remove HTML tags
+    text = re.sub(r'<.*?>', '', text)
+    # Remove URLs
+    text = re.sub(r'http\S+|www\S+', '', text)
+    # Remove extra spaces and special characters
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+print(f"Reading Excel file: {INPUT_EXCEL}")
+df = pd.read_excel(INPUT_EXCEL)
+if TEXT_COLUMN not in df.columns:
+    raise ValueError(f"Column '{TEXT_COLUMN}' not found in Excel file.")
+df[TEXT_COLUMN] = df[TEXT_COLUMN].astype(str).apply(clean_text)
+texts = df[TEXT_COLUMN].tolist()
+
+# Define a function to predict sentiment scores
+def predict_sentiment(texts):
+    scores = []
+    with torch.no_grad():
+        for i in range(0, len(texts), BATCH_SIZE):
+            batch_texts = texts[i:i + BATCH_SIZE]
+            encoding = tokenizer(batch_texts, return_tensors='pt', padding=True, truncation=True, max_length=MAX_LENGTH)
+            input_ids = encoding['input_ids'].to(device)
+            attention_mask = encoding['attention_mask'].to(device)
+
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+            probabilities = softmax(logits, dim=1)  # Calculate probability for each class
+
+            if probabilities.size(1) == 2:
+                positive_probs = probabilities[:, 1].cpu().numpy()
+                scores.extend(positive_probs.tolist())
+            else:
+                max_probs = probabilities.cpu().max(dim=1).values.numpy()
+                scores.extend(max_probs.tolist())
+    return scores
+
+# Perform sentiment analysis
+print('Starting sentiment analysis...')
+sentiment_scores = predict_sentiment(texts)
+print('Sentiment analysis completed.')
+
+# Add scores to DataFrame
+df['sentiment_score'] = sentiment_scores
+
+# Save results to new Excel file
+df.to_excel(OUTPUT_EXCEL, index=False)
+print(f'Sentiment scores saved to {OUTPUT_EXCEL}')
+
+# Visualize sentiment score distribution
+plt.hist(sentiment_scores, bins=50, color='blue', alpha=0.7)
+plt.title('Sentiment Score Distribution')
+plt.xlabel('Sentiment Score (0-1 or 0-2)')
+plt.ylabel('Frequency')
+plt.savefig(os.path.join(current_dir, 'sentiment_distribution.png'))
+print(f'Sentiment score distribution plot saved to {os.path.join(current_dir, "sentiment_distribution.png")}')
+plt.show()

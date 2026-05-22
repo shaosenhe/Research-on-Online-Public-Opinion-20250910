@@ -1,0 +1,335 @@
+import jieba
+import pandas as pd
+from gensim import corpora
+from gensim.models.coherencemodel import CoherenceModel
+from gensim.models.ldamulticore import LdaMulticore
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import pyLDAvis.gensim_models as gensimvis
+import pyLDAvis
+from multiprocessing import Pool, cpu_count
+import warnings
+from collections import Counter, defaultdict
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+import os
+import time
+
+warnings.filterwarnings('ignore')
+
+# Create folder paths
+INPUT_DIR = "pycharm/LDA_input"
+OUTPUT_DIR = "pycharm/LDA_30词_output"
+
+# Ensure folders exist
+os.makedirs(INPUT_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Load custom dictionary and stopwords
+jieba.load_userdict(os.path.join(INPUT_DIR, "custom_dict.txt"))
+with open(os.path.join(INPUT_DIR, "stopwords2.txt"), "r", encoding="utf-8") as f:
+    stopwords = set(f.read().splitlines())
+
+# Process specific phrases
+def replace_special_terms(text):
+    text = text.replace("女子", "女")
+    text = text.replace("男子", "男")
+    text = text.replace("女生", "女")
+    text = text.replace("男生", "男")
+    text = text.replace("男女", "男 女")
+    text = text.replace("考编里", "考编 里")
+    text = text.replace("女硕士", "女 硕士")
+    text = text.replace("女博士", "女 博士")
+    text = text.replace("男硕士", "男 硕士")
+    text = text.replace("男博士", "男 博士")
+    text = text.replace("本科生", "本科 生")
+    text = text.replace("硕士生", "硕士 生")
+    text = text.replace("博士生", "博士 生")
+    text = text.replace("毕业生", "毕业 生")
+    text = text.replace("一男", "一 男")
+    text = text.replace("一女", "一 女")
+    text = text.replace("一命", "一 命")
+    text = text.replace("大学毕业", "大学 毕业")
+    text = text.replace("本科毕业", "本科 毕业")
+    text = text.replace("毕业典礼", "毕业 典礼")
+    text = text.replace("开学典礼", "开学 典礼")
+    text = text.replace("大学老师", "大学 老师")
+    text = text.replace("本科专业", "本科 专业")
+    text = text.replace("硕士论文", "硕士 论文")
+    text = text.replace("博士论文", "博士 论文")
+    text = text.replace("毕业论文", "毕业 论文")
+    text = text.replace("大学排名", "大学 排名")
+    text = text.replace("高校学生", "高校 学生")
+    text = text.replace("北京高校", "北京 高校")
+    text = text.replace("本科学位", "本科 学位")
+    text = text.replace("硕士学位", "硕士 学位")
+    text = text.replace("博士学位", "博士 学位")
+    text = text.replace("大学教授", "大学 教授")
+    text = text.replace("本科课程", "本科 课程")
+    text = text.replace("小学校长", "小学 校长")
+    text = text.replace("省", " 省 ")
+    text = text.replace("市", " 市 ")
+    text = text.replace("县", " 县 ")
+    text = text.replace("案二审", "案 二审")
+    text = text.replace("录取通知书", "录取 通知书")
+    text = text.replace("人不爱出省读书", "人 不爱 出省 读书")
+    text = text.replace("人不爱出", "人 不爱 出")
+    return text
+
+# Modified tokenization function, returns word list and word frequency statistics for the document
+def preprocess_text(text):
+    text = replace_special_terms(text)
+    words = jieba.cut(text)
+    filtered_words = [word for word in words if word.strip() and word not in stopwords]
+    word_counts = Counter(filtered_words)
+    top_30_words = set([word for word, freq in word_counts.most_common(30)])
+    final_words = [word for word in filtered_words if word in top_30_words]
+    return final_words, word_counts
+
+# Modified parallel tokenization function
+def parallel_preprocess_texts(texts):
+    with Pool(cpu_count()) as pool:
+        results = pool.map(preprocess_text, texts)
+    data_set = [result[0] for result in results]
+    doc_word_counts = [result[1] for result in results]
+    return data_set, doc_word_counts
+
+# Modified filtering function, returns filtered data and word frequency statistics
+def filter_low_frequency_words(data_set, original_doc_counts, min_docs=26):
+    word_doc_count = defaultdict(int)
+    for doc in data_set:
+        unique_words = set(doc)
+        for word in unique_words:
+            word_doc_count[word] += 1
+
+    filtered_data_set = []
+    filtered_doc_counts = []
+    for i, doc in enumerate(data_set):
+        filtered_doc = [word for word in doc if word_doc_count[word] >= min_docs]
+        filtered_data_set.append(filtered_doc)
+        filtered_counts = {word: original_doc_counts[i][word] for word in filtered_doc if
+                           word in original_doc_counts[i]}
+        filtered_doc_counts.append(filtered_counts)
+
+    return filtered_data_set, filtered_doc_counts
+
+# Use multicore LDA model
+def train_lda_model_multicore(num_topics, corpus, dictionary, num_words=30):
+    print(f"\n开始训练主题数为 {num_topics} 的模型...")
+    start_time = time.time()
+    
+    ldamodel = LdaMulticore(
+        corpus,
+        num_topics=num_topics,
+        id2word=dictionary,
+        passes=50,
+        workers=cpu_count(),
+        random_state=1,
+        alpha=0.05,
+        eta=0.005
+    )
+    
+    elapsed_time = time.time() - start_time
+    print(f"主题数 {num_topics} 的模型训练完成，耗时 {elapsed_time:.2f} 秒")
+    print(f"主题数 {num_topics} 的主题 (显示前{num_words}个关键词):")
+    for idx, topic in ldamodel.print_topics(num_topics=num_topics, num_words=num_words):
+        print(f"主题 {idx}: {topic}")
+    return ldamodel
+
+# Calculate similarity between text and topics
+def calculate_similarity(ldamodel, dictionary, texts, corpus, num_topics):
+    topic_keywords = {}
+    for i in range(num_topics):
+        topic_words = [word for word, _ in ldamodel.show_topic(i, topn=50)]
+        topic_keywords[i] = topic_words
+
+    similarities = []
+    for text in texts:
+        # Convert text to bag-of-words model
+        bow = dictionary.doc2bow(text)
+        
+        # Get text frequency vector
+        text_freq = np.zeros(len(dictionary))
+        for word_id, count in bow:
+            text_freq[word_id] = count
+
+        # Calculate similarity for each topic
+        topic_similarities = []
+        for i in range(num_topics):
+            topic_weights = np.zeros(len(dictionary))
+            for word in topic_keywords[i]:
+                word_id = dictionary.token2id.get(word, -1)
+                if word_id != -1:
+                    topic_weights[word_id] = ldamodel.get_topics()[i][word_id]
+            similarity = cosine_similarity([text_freq], [topic_weights])[0][0]
+            topic_similarities.append(similarity)
+        similarities.append(topic_similarities)
+
+    return similarities, topic_keywords
+
+# Calculate coherence
+def coherence_score(num_topics, data_set, corpus, dictionary, num_words=30):
+    ldamodel = train_lda_model_multicore(num_topics, corpus, dictionary, num_words)
+    print(f"计算主题数 {num_topics} 的一致性分数...")
+    start_time = time.time()
+    ldacm = CoherenceModel(model=ldamodel, texts=data_set, dictionary=dictionary, coherence='c_v')
+    coherence_score = ldacm.get_coherence()
+    elapsed_time = time.time() - start_time
+    print(f"主题数 {num_topics} 的 Coherence 分数: {coherence_score}，计算耗时 {elapsed_time:.2f} 秒\n")
+    return coherence_score, ldamodel
+
+# Calculate perplexity
+def perplexity_score(ldamodel, corpus):
+    print(f"计算困惑度...")
+    start_time = time.time()
+    perplex = ldamodel.log_perplexity(corpus)
+    elapsed_time = time.time() - start_time
+    print(f"困惑度: {perplex}，计算耗时 {elapsed_time:.2f} 秒\n")
+    return perplex
+
+if __name__ == '__main__':
+    matplotlib.rcParams['font.sans-serif'] = ['SimHei']
+    matplotlib.rcParams['axes.unicode_minus'] = False
+
+    PATH = os.path.join(INPUT_DIR, "底稿数据-LDAinput.xlsx")
+    print(f"使用输入文件: {PATH}")
+    df = pd.read_excel(PATH)
+
+    if '内容' not in df.columns:
+        raise ValueError("数据中缺少 '内容' 列")
+
+    print("开始分词处理...")
+    data_set, original_doc_counts = parallel_preprocess_texts(df['内容'].astype(str).tolist())
+    print("分词完成。")
+
+    print("统计高频词并过滤低频词...")
+    data_set, filtered_doc_counts = filter_low_frequency_words(data_set, original_doc_counts, min_docs=26)
+    print("过滤完成。")
+
+    # Count total word frequency
+    total_word_counts = Counter()
+    for doc in data_set:
+        total_word_counts.update(doc)
+
+    # Build dictionary and corpus
+    dictionary = corpora.Dictionary(data_set)
+    corpus = [dictionary.doc2bow(text) for text in data_set]
+    print("词典和语料构建完成。")
+
+    # Determine optimal number of topics
+    print("开始计算不同主题数的 Coherence 分数和困惑度...")
+    topic_range = range(4, 11)  # Range of topic numbers
+    coherence_scores = []
+    perplexity_scores = []
+    num_words_for_coherence = 30
+    
+    total_start_time = time.time()
+    total_topics = len(topic_range)
+    
+    for i, num in enumerate(topic_range):
+        print(f"\n[进度: {i+1}/{total_topics}] 正在处理主题数 {num}...")
+        topic_start_time = time.time()
+        
+        score, model = coherence_score(num, data_set, corpus, dictionary, num_words=num_words_for_coherence)
+        coherence_scores.append(score)
+        
+        perplex = perplexity_score(model, corpus)
+        perplexity_scores.append(perplex)
+        
+        topic_elapsed = time.time() - topic_start_time
+        total_elapsed = time.time() - total_start_time
+        avg_time_per_topic = total_elapsed / (i + 1)
+        remaining_topics = total_topics - (i + 1)
+        estimated_remaining = avg_time_per_topic * remaining_topics
+        
+        print(f"已完成主题数 {num} 的处理，耗时 {topic_elapsed:.2f} 秒")
+        print(f"总进度: {i+1}/{total_topics} ({(i+1)/total_topics*100:.1f}%)")
+        
+        if remaining_topics > 0:
+            print(f"预计剩余时间: {estimated_remaining/60:.1f} 分钟 ({estimated_remaining:.0f} 秒)")
+
+    total_time = time.time() - total_start_time
+    print(f"\n所有主题数的计算完成，总耗时: {total_time/60:.1f} 分钟 ({total_time:.0f} 秒)")
+
+    # Plot Coherence score changes
+    plt.figure(figsize=(10, 6))
+    plt.plot(topic_range, coherence_scores, marker='o')
+    plt.xlabel('主题数目')
+    plt.ylabel('Coherence 分数')
+    plt.title('不同主题数的 Coherence 分数')
+    plt.grid(True)
+    plt.savefig(os.path.join(OUTPUT_DIR, "coherence_scores.png"))
+
+    # Plot Perplexity
+    plt.figure(figsize=(10, 6))
+    plt.plot(topic_range, perplexity_scores, marker='o', color='#FEA403')
+    plt.xlabel('主题数目')
+    plt.ylabel('Perplexity 分数')
+    plt.title('不同主题数的 Perplexity 分数')
+    plt.grid(True)
+    plt.savefig(os.path.join(OUTPUT_DIR, "perplexity_scores.png"))
+
+    # Select the topic number with the highest Coherence score
+    optimal_num_topics = topic_range[coherence_scores.index(max(coherence_scores))]
+    print(f"最佳主题数目为: {optimal_num_topics}\n")
+
+    # Train final LDA model
+    print(f"训练 LDA 模型，主题数目为 {optimal_num_topics}...")
+    final_model_start = time.time()
+    num_words_for_final = 30 
+    ldamodel = train_lda_model_multicore(optimal_num_topics, corpus, dictionary, num_words=num_words_for_final)
+    final_model_time = time.time() - final_model_start
+    print(f"LDA 模型训练完成，耗时 {final_model_time/60:.1f} 分钟。\n")
+
+    # Calculate similarity
+    print("计算文档与主题的相似度...")
+    similarity_start = time.time()
+    similarities, topic_keywords = calculate_similarity(ldamodel, dictionary, data_set, corpus, optimal_num_topics)
+    similarity_time = time.time() - similarity_start
+    print(f"相似度计算完成，耗时 {similarity_time:.2f} 秒。")
+
+    # Generate keyword list (sorted by total word frequency)
+    keywords_list = []
+    for doc, doc_counts in zip(data_set, filtered_doc_counts):
+        unique_words = list(set(doc))  # Remove duplicates
+        # Sort by total word frequency in descending order
+        sorted_words = sorted(unique_words, key=lambda x: (-total_word_counts[x], x))
+        keywords_list.append(','.join(sorted_words))
+
+    # Add to DataFrame
+    similarity_df = pd.DataFrame(similarities, columns=[f"主题 {i}" for i in range(optimal_num_topics)])
+    similarity_df['最相似主题'] = similarity_df.idxmax(axis=1)
+    similarity_df['关键词'] = keywords_list
+
+    # Save results to output directory
+    similarity_df.to_excel(os.path.join(OUTPUT_DIR, "LDAoutput.xlsx"), index=False)
+    print("相似度结果已保存。\n")
+
+    # Output top 50 keywords and weights for each topic
+    topic_keywords_df = pd.DataFrame(topic_keywords)
+    topic_keywords_df.to_excel(os.path.join(OUTPUT_DIR, "topic_keywords.xlsx"), index=False)
+    print("主题关键词已保存。\n")
+
+    # Save pyLDAvis visualization results
+    print("生成可视化结果...")
+    vis_start = time.time()
+    vis_data = gensimvis.prepare(ldamodel, corpus, dictionary)
+    pyLDAvis.save_html(vis_data, os.path.join(OUTPUT_DIR, "pycharm_lda_visualization.html"))
+    vis_time = time.time() - vis_start
+    print(f"pyLDAvis 可视化结果已保存，耗时 {vis_time:.2f} 秒。")
+    
+    # Save model
+    ldamodel.save(os.path.join(OUTPUT_DIR, "lda_model"))
+    print("LDA模型已保存。")
+    
+    # Calculate perplexity
+    print("计算困惑度...")
+    perplexity_start = time.time()
+    perplex = perplexity_score(ldamodel, corpus)
+    perplexity_time = time.time() - perplexity_start
+    print(f"困惑度计算完成，耗时 {perplexity_time:.2f} 秒。")
+
+    # Summarize runtime
+    total_runtime = time.time() - total_start_time
+    print(f"\n程序总运行时间: {total_runtime/60:.1f} 分钟 ({total_runtime:.0f} 秒)") 
